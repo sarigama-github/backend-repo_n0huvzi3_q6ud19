@@ -1,9 +1,14 @@
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr
+from typing import Dict, Any
 
-app = FastAPI()
+from database import db, create_document, get_documents
+import schemas as app_schemas
 
+app = FastAPI(title="Swiss Insurance Broker API", version="1.0.0")
+
+# CORS (allow all origins for development; adjust in production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -12,60 +17,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {"status": "ok", "service": "broker-backend"}
+
 
 @app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
+def test_db() -> Dict[str, Any]:
     try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+        if db is None:
+            raise Exception("Database not configured")
+        # Ping by listing collections
+        _ = db.list_collection_names()
+        return {"database": "connected"}
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        return {"database": "unavailable", "error": str(e)}
 
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.get("/schema")
+def get_schema():
+    # Introspect pydantic models defined in schemas.py (exclude builtins)
+    models = {}
+    for name in dir(app_schemas):
+        attr = getattr(app_schemas, name)
+        if isinstance(attr, type) and issubclass(attr, BaseModel) and attr is not BaseModel:
+            try:
+                models[name] = attr.model_json_schema()
+            except Exception:
+                pass
+    return {"models": models}
+
+
+# Contact/Lead submission
+@app.post("/contact")
+def create_lead(payload: app_schemas.Lead):
+    try:
+        lead_id = create_document("lead", payload)
+        return {"ok": True, "id": lead_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/leads")
+def list_leads(limit: int = 20):
+    try:
+        docs = get_documents("lead", limit=limit)
+        # Convert ObjectId to str for safety
+        for d in docs:
+            if "_id" in d:
+                d["_id"] = str(d["_id"])
+        return {"items": docs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
